@@ -6,16 +6,27 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches
 from matplotlib.ticker import MultipleLocator
-from matplotlib import rc
+import matplotlib.transforms
 import seaborn as sns
+import sys
+import os
+import re
 
 # rc("font", **{
 #     "family": "monospace",
 # })
-rc("text", usetex=True)
-sns.set_context("talk")
+plt.rc("text", usetex=True)
+plt.rcParams["text.latex.preamble"] = [
+    r"\usepackage{siunitx}",
+    r"\sisetup{detect-all}",
+]
 sns.set_style("ticks")
-
+sns.set_context("poster")
+sns.set_palette([
+    (202 / 256, 51 / 256, 0),
+    (49 / 256, 99 / 256, 206 / 256),
+    (255 / 256, 155 / 256, 0)
+])
 
 class SubplotManager(object):
     def __init__(self, rows, cols, magic_func=lambda x: x):
@@ -79,15 +90,33 @@ class DataManager(object):
 
 class GrowthCurve(object):
     def stripcomments(self, fn):
+        regex = re.compile("\<\+(.*?)\+\>")
         f = open(fn).read()
         s = ""
         for line in f.split("\n"):
             if not line:
                 pass
-            elif line[0] == "#":
+            elif line.strip()[0] == "#":
                 pass
             else:
-                s += "{0}\n".format(line)
+                if regex.search(line):
+#                    for m in regex.finditer(line):
+                    key = regex.search(line).group(1)
+                    if key == "last":
+                        prev_line = s.split("\n")[-2]
+                        if prev_line.strip().endswith(","):
+                            replacement = prev_line.strip()[:-1]
+                        else:
+                            replacement = prev_line
+                    else:
+                        replacement = "null"
+
+                    if line.strip().endswith(","):
+                        s += "{0},\n".format(replacement)
+                    else:
+                        s += "{0}\n".format(replacement)
+                else:
+                    s += "{0}\n".format(line)
         return s
 
     def __init__(self, data="data.json"):
@@ -149,6 +178,7 @@ class GrowthCurve(object):
         self.label = label
         self.survival = []
         self.survival_min = []
+        self.survival_max = []
         self.survival_points = []
         for x in self.resources:
             self.plot_x(x)
@@ -190,9 +220,8 @@ class GrowthCurve(object):
             plt.errorbar(tp[:, 0], tp[:, 1], yerr=tp[:, 2], label=label)
 
         plt.yscale("log")
-        plt.ylim([10**6, 10**10])
+        # plt.ylim([10**6, 10**10])
         # plt.ylim([10**2, 10**10])
-        # plt.xlim([0, 120])
         # plt.xlim([0, 73])
 
         plt.ylabel("CFU (ml$^{-1}$)")
@@ -200,28 +229,33 @@ class GrowthCurve(object):
 #            l[:2], leg[:2], loc=3, numpoints=1
 #        )
 #
-        plt.legend()
+        plt.legend(loc="lower left", numpoints=1)
         plt.xlabel("Time (h)")
 
-        y0, y1 = plt.ylim()
+        trans = matplotlib.transforms.blended_transform_factory(
+            ax1.transData, ax1.transAxes
+        )
         rect = matplotlib.patches.Rectangle(
-            (ref_delta, y0),
+            (ref_delta, 0),
             rif_delta,
-            (y1 - y0),
+            1,
             facecolor="y",
             edgecolor=None,
             alpha=.3,
+            transform=trans
         )
         ax1.add_patch(rect)
 
         t0_index = np.argmin(np.abs([(_ - self.add_time) for _ in self.timings]))
 #        t0_index = ([(_ < self.add_time) for _ in self.timings]).index(False)
-        t0_time = self.timings[t0_index]
-        try:
-            t0_cfu = x.positive.get_timepoint(t0_time).cfu()
-        except AttributeError:
-            t0_time = self.timings[t0_index + 1]
-            t0_cfu = x.positive.get_timepoint(t0_time).cfu()
+        addition = 0
+        while True:
+            t0_time = self.timings[t0_index + addition]
+            try:
+                t0_cfu = x.positive.get_timepoint(t0_time).cfu()
+                break
+            except AttributeError:
+                addition += 1
 
         try:
 #            t1_index = ([(_ < self.remove_time) for _ in self.timings]).index(False) - 1
@@ -254,6 +288,12 @@ class GrowthCurve(object):
         t2_index = cfus.index(min(cfus))
         t2_time = positives[t2_index].time
         t2_cfu = cfus[t2_index]
+
+        all_positives = x.positive.tp[:t1_index + 1]
+        all_positive_cfus = [_.cfu() for _ in all_positives]
+        t3_index = all_positive_cfus.index(max(all_positive_cfus))
+        t3_time = all_positives[t3_index].time
+        t3_cfu = all_positive_cfus[t3_index]
 
         self.survival_points.append(
             (
@@ -297,6 +337,20 @@ class GrowthCurve(object):
             )
         )
 
+        self.survival_points.append(
+            (
+                ax1,
+                [t3_time, t3_cfu],
+                {
+                    "marker": "o",
+                    "color": "g",
+                    "markersize": 10,
+                    "markeredgewidth": 2,
+                    "fillstyle": "none"
+                }
+            )
+        )
+
         if self.label:
             self.survival.append(
                 (self.label, t1_cfu / t0_cfu)
@@ -308,12 +362,17 @@ class GrowthCurve(object):
         self.survival_min.append(
             (t2_cfu / t0_cfu)
         )
+        self.survival_max.append(
+            (t2_cfu / t3_cfu)
+        )
 
-    def plot_survival(self, ax=None, circle=True, add=0, y1locadd=[], y2locadd=[]):
+    def plot_survival(self, ax=None, circle=True, add=0, y1locadd=[], y2locadd=[], y3locadd=[]):
         if type(y1locadd) is not list:
             y1locadd = [y1locadd]
         if type(y2locadd) is not list:
             y2locadd = [y2locadd]
+        if type(y3locadd) is not list:
+            y3locadd = [y3locadd]
 
         if not ax:
             sp = self.SP()
@@ -331,11 +390,14 @@ class GrowthCurve(object):
         xlocs = (np.arange(len(self.resources)) / 2) + (add * spacing)
         ylocs = np.array([y for x, y in self.survival]) * 100
         y2locs = np.array(self.survival_min) * 100
+        y3locs = np.array(self.survival_max) * 100
 
         if not y1locadd:
             y1locadd = [0] * len(ylocs)
         if not y2locadd:
             y2locadd = [0] * len(ylocs)
+        if not y3locadd:
+            y3locadd = [0] * len(ylocs)
 
         if circle:
             for sp_ax, args, kwargs in self.survival_points:
@@ -357,6 +419,14 @@ class GrowthCurve(object):
             edgecolor="k",
             alpha=.3
         )
+        plt.bar(
+            xlocs,
+            y3locs,
+            width,
+            color="y",
+            edgecolor="k",
+            alpha=.3,
+        )
 
         val_idx = 0
         for val in ylocs:
@@ -375,6 +445,14 @@ class GrowthCurve(object):
                 horizontalalignment="center",
                 verticalalignment="bottom",
                 color="red",
+            )
+            plt.text(
+                xlocs[val_idx] + (width / 2),
+                y3locs[val_idx] + y3locadd[val_idx],
+                r"\textbf{{{0:.3f}\%}}".format(y3locs[val_idx]),
+                horizontalalignment="center",
+                verticalalignment="bottom",
+                color="green",
             )
             val_idx += 1
 
@@ -414,7 +492,20 @@ class GrowthCurve(object):
         return plt.gca(), len(xlocs)
 
 if __name__ == "__main__":
-    g = GrowthCurve()
+    try:
+        fn = sys.argv[1]
+        if not os.path.exists(fn):
+            fn = "data.json"
+    except:
+        fn = "data.json"
+
+    print("Generating plot for {0}".format(fn))
+    try:
+        out = sys.argv[2]
+    except:
+        out = "population-cfu.pdf"
+
+    g = GrowthCurve(data=fn)
 #    g2 = GrowthCurve("data-150310.json")
 #    g3 = GrowthCurve("data-141114.json")
 
@@ -453,4 +544,81 @@ if __name__ == "__main__":
 #        y1locadd=[0.4, 0]
 #    )
     plt.tight_layout()
-    plt.savefig("population-cfu.pdf")
+    print("Saving figure to {0}".format(out))
+    plt.savefig(out)
+    plt.close()
+
+    fig = plt.figure(figsize=(9.42, 4.71))
+    fig.patch.set_facecolor("none")
+    fig.patch.set_alpha(0)
+
+    ax1 = fig.add_subplot(121)
+    sns.despine()
+    #ax1.set_title("With RIF")
+    ax1.set_xlabel("Time (h)")
+    ax1.set_ylabel("CFU (ml$^{-1}$)")
+    ax1.set_yscale("log")
+    ax1.patch.set_facecolor("none")
+    ax1.patch.set_alpha(0)
+
+    #ax2 = fig.add_subplot(122, sharex=ax1, sharey=ax1)
+    ax2 = fig.add_subplot(122)
+    sns.despine()
+    #ax2.set_title("No RIF")
+    ax2.set_xlabel("Time (h)")
+    ax2.set_ylabel("CFU (ml$^{-1}$)")
+    ax2.set_yscale("log")
+    ax2.patch.set_facecolor("none")
+    ax2.patch.set_alpha(0)
+
+    c = sns.color_palette()
+    for x in g.resources:
+        print(x.description)
+        if x.description == "HdB/pyruvate":
+            colour = c[2]
+        elif x.description == "HdB/acetate":
+            colour = c[1]
+        elif x.description == "HdB/glycerol":
+            colour = c[0]
+
+        pos = x.positive.timepoints()
+        neg = x.negative.timepoints()
+        ax1.plot(pos[:, 0], pos[:, 1], label=x.description, color=colour)
+        ax2.errorbar(
+            neg[:, 0], neg[:, 1], neg[:, 2], label=x.description, color=colour,
+            marker=".",
+            ms=8,
+            ls="-",
+            lw=2,
+        )
+
+#        import code
+#        print("label:", x.description)
+#        variables = {
+#            "data": neg,
+#            "plt": plt,
+#            "np": np,
+#        }
+#        code.interact(local=variables)
+
+
+#    ax1.legend(loc="lower left")
+#    ax2.legend(loc="lower left")
+
+#    ax1.set_xlim([0, 80])
+#    ax2.set_xlim([0, 80])
+#    ax1.set_ylim([10**3, 10**9])
+#    ax2.set_ylim([10**3, 10**9])
+
+    fig.tight_layout()
+    fn = "traces.pdf"
+    print("Saving figure to {0}".format(fn))
+    fig.savefig(fn, facecolor="none", edgecolor="none", transparent=True)
+
+    fn = "traces-rif.pdf"
+    extent = matplotlib.transforms.Bbox([[0, 0], [4.71, 4.71]])
+    fig.savefig(fn, facecolor="none", edgecolor="none", transparent=True, bbox_inches=extent)
+
+    fn = "traces-no-rif.pdf"
+    extent = matplotlib.transforms.Bbox([[4.71, 0], [9.42, 4.71]])
+    fig.savefig(fn, facecolor="none", edgecolor="none", transparent=True, bbox_inches=extent)
